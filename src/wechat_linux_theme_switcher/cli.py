@@ -333,10 +333,6 @@ def switch_theme(args: argparse.Namespace) -> int:
 
     if current_value == target_value:
         print(f"Already set to {target_name}.")
-        if args.force_restart and running and not args.dry_run:
-            restart_argv = stop_wechat_for_restart(running)
-            start_wechat(restart_argv)
-            print("Restarted WeChat.")
         return 0
 
     if running and not args.force and not args.force_restart and not args.dry_run:
