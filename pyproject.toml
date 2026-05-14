@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wechat-linux-theme-switcher"
+version = "0.1.0"
+description = "Switch WeChat Linux dark/light theme by editing encrypted MMKV config."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=41",
+]
+
+[project.scripts]
+wechat-linux-theme-switcher = "wechat_linux_theme_switcher.cli:main"
