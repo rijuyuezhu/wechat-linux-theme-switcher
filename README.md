@@ -9,10 +9,16 @@ uv run wechat-linux-theme-switcher dark
 uv run wechat-linux-theme-switcher light
 ```
 
-By default, the tool refuses to write while WeChat is running. Quit WeChat first, or pass `--force` if you accept the race/overwrite risk.
+By default, the tool refuses to write while WeChat is running. Quit WeChat first, pass `--force` if you accept the race/overwrite risk, or pass `--force-restart` to stop WeChat, write the config, and restart it.
 
 ```bash
 uv run wechat-linux-theme-switcher dark --force
+```
+
+`--force` and `--force-restart` are mutually exclusive.
+
+```bash
+uv run wechat-linux-theme-switcher dark --force-restart
 ```
 
 Preview without writing:

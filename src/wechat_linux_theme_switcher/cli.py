@@ -1,11 +1,12 @@
-from __future__ import annotations
-
 import argparse
 import binascii
 import os
 import shutil
+import signal
 import struct
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,7 +22,6 @@ except ImportError:  # cryptography < 48
 MMKV_CRYPT_KEY = b"xwechat_crypt_key"[:16]
 APPEARANCE_KEY = "gAppearanceKey"
 type Theme = Literal["dark", "light"]
-type ProcessInfo = tuple[int, str]
 type BackupPaths = tuple[Path, Path]
 
 THEME_VALUES: dict[Theme, int] = {"light": 1, "dark": 2}
@@ -49,6 +49,13 @@ class MMKVFile:
     actual_size: int
     iv: bytes
     plain: bytes
+
+
+@dataclass(frozen=True)
+class WeChatProcess:
+    pid: int
+    comm: str
+    argv: tuple[str, ...]
 
 
 def read_varint(buf: bytes, pos: int) -> tuple[int, int]:
@@ -208,9 +215,14 @@ def make_backups(mmkv: MMKVFile) -> BackupPaths:
     return config_backup, crc_backup
 
 
-def find_wechat_processes() -> list[ProcessInfo]:
+def read_cmdline(path: Path) -> tuple[str, ...]:
+    raw = path.read_bytes()
+    return tuple(part.decode(errors="ignore") for part in raw.split(b"\x00") if part)
+
+
+def find_wechat_processes() -> list[WeChatProcess]:
     proc = Path("/proc")
-    matches: list[ProcessInfo] = []
+    matches: list[WeChatProcess] = []
     if not proc.exists():
         return matches
 
@@ -220,14 +232,93 @@ def find_wechat_processes() -> list[ProcessInfo]:
         pid = int(entry.name)
         try:
             comm = (entry / "comm").read_text(errors="ignore").strip()
-            cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
-                errors="ignore"
-            )
+            argv = read_cmdline(entry / "cmdline")
         except OSError:
             continue
-        if comm == "wechat" or "/opt/wechat/wechat" in cmdline:
-            matches.append((pid, cmdline or comm))
+        command = " ".join(argv)
+        if comm == "wechat" or "/opt/wechat/wechat" in command:
+            matches.append(WeChatProcess(pid, comm, argv))
     return matches
+
+
+def choose_restart_argv(processes: list[WeChatProcess]) -> tuple[str, ...]:
+    for process in processes:
+        if process.argv and not any(
+            arg.startswith("--type=") for arg in process.argv[1:]
+        ):
+            return process.argv
+    for process in processes:
+        if process.argv:
+            return process.argv
+    return ("/opt/wechat/wechat",)
+
+
+def process_exists(pid: int) -> bool:
+    return Path(f"/proc/{pid}").exists()
+
+
+def stop_wechat_processes(processes: list[WeChatProcess]) -> None:
+    for process in processes:
+        try:
+            os.kill(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            raise SwitchError(
+                f"permission denied stopping WeChat pid {process.pid}"
+            ) from exc
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not any(process_exists(process.pid) for process in processes):
+            return
+        time.sleep(0.1)
+
+    remaining = [process for process in processes if process_exists(process.pid)]
+    for process in remaining:
+        try:
+            os.kill(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            raise SwitchError(
+                f"permission denied killing WeChat pid {process.pid}"
+            ) from exc
+
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not any(process_exists(process.pid) for process in remaining):
+            return
+        time.sleep(0.1)
+
+    pid_text = ", ".join(
+        str(process.pid) for process in remaining if process_exists(process.pid)
+    )
+    if pid_text:
+        raise SwitchError(f"failed to stop WeChat pid: {pid_text}")
+
+
+def start_wechat(argv: tuple[str, ...]) -> None:
+    try:
+        subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        raise SwitchError(
+            f"failed to restart WeChat with command: {' '.join(argv)}"
+        ) from exc
+
+
+def stop_wechat_for_restart(processes: list[WeChatProcess]) -> tuple[str, ...]:
+    restart_argv = choose_restart_argv(processes)
+    pid_text = ", ".join(str(process.pid) for process in processes[:5])
+    print(f"Stopping WeChat (pid: {pid_text})...")
+    stop_wechat_processes(processes)
+    return restart_argv
 
 
 def switch_theme(args: argparse.Namespace) -> int:
@@ -238,25 +329,45 @@ def switch_theme(args: argparse.Namespace) -> int:
     mmkv = load_mmkv(config_path)
     records = parse_records(mmkv.plain)
     current_value = current_appearance(records)
+    running = find_wechat_processes()
 
     if current_value == target_value:
         print(f"Already set to {target_name}.")
+        if args.force_restart and running and not args.dry_run:
+            restart_argv = stop_wechat_for_restart(running)
+            start_wechat(restart_argv)
+            print("Restarted WeChat.")
         return 0
 
-    running = find_wechat_processes()
-    if running and not args.force and not args.dry_run:
-        pid_text = ", ".join(str(pid) for pid, _cmd in running[:5])
+    if running and not args.force and not args.force_restart and not args.dry_run:
+        pid_text = ", ".join(str(process.pid) for process in running[:5])
         raise SwitchError(
             "WeChat appears to be running "
-            f"(pid: {pid_text}). Quit WeChat first or pass --force."
+            f"(pid: {pid_text}). Quit WeChat first, pass --force, or pass --force-restart."
         )
+
+    restart_argv: tuple[str, ...] | None = None
+    if args.force_restart and running and not args.dry_run:
+        restart_argv = stop_wechat_for_restart(running)
+        mmkv = load_mmkv(config_path)
+        records = parse_records(mmkv.plain)
+        current_value = current_appearance(records)
+        if current_value == target_value:
+            print(f"Already set to {target_name}.")
+            start_wechat(restart_argv)
+            print("Restarted WeChat.")
+            return 0
 
     new_plain = mmkv.plain + int_record(APPEARANCE_KEY, target_value)
     new_raw = build_raw_config(mmkv, new_plain)
     new_crc = build_crc_meta(mmkv, new_raw)
 
-    old_name = "unset" if current_value is None else {1: "light", 2: "dark", 0: "automatic"}.get(
-        current_value, str(current_value)
+    old_name = (
+        "unset"
+        if current_value is None
+        else {1: "light", 2: "dark", 0: "automatic"}.get(
+            current_value, str(current_value)
+        )
     )
     print(f"Current appearance: {old_name}")
     print(f"Target appearance: {target_name}")
@@ -277,7 +388,11 @@ def switch_theme(args: argparse.Namespace) -> int:
         print(f"Backup: {backups[0]}")
         print(f"Backup: {backups[1]}")
     print(f"Switched WeChat appearance to {target_name}.")
-    print("Restart WeChat if it was already running.")
+    if restart_argv:
+        start_wechat(restart_argv)
+        print("Restarted WeChat.")
+    elif running:
+        print("Restart WeChat if it was already running.")
     return 0
 
 
@@ -292,9 +407,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CONFIG,
         help=f"path to global_config (default: {DEFAULT_CONFIG})",
     )
-    parser.add_argument("--dry-run", action="store_true", help="parse and preview without writing")
-    parser.add_argument("--force", action="store_true", help="write even if WeChat appears to run")
-    parser.add_argument("--no-backup", action="store_true", help="do not create .bak files")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="parse and preview without writing"
+    )
+    force_group = parser.add_mutually_exclusive_group()
+    force_group.add_argument(
+        "--force", action="store_true", help="write even if WeChat appears to run"
+    )
+    force_group.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="stop running WeChat, write, then restart it",
+    )
+    parser.add_argument(
+        "--no-backup", action="store_true", help="do not create .bak files"
+    )
     return parser
 
 
