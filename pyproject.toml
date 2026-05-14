@@ -7,7 +7,7 @@ name = "wechat-linux-theme-switcher"
 version = "0.1.0"
 description = "Switch WeChat Linux dark/light theme by editing encrypted MMKV config."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
   "cryptography>=41",
 ]

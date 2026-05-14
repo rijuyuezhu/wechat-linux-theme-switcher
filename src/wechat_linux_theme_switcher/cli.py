@@ -8,6 +8,7 @@ import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
@@ -19,7 +20,11 @@ except ImportError:  # cryptography < 48
 
 MMKV_CRYPT_KEY = b"xwechat_crypt_key"[:16]
 APPEARANCE_KEY = "gAppearanceKey"
-THEME_VALUES = {"light": 1, "dark": 2}
+type Theme = Literal["dark", "light"]
+type ProcessInfo = tuple[int, str]
+type BackupPaths = tuple[Path, Path]
+
+THEME_VALUES: dict[Theme, int] = {"light": 1, "dark": 2}
 DEFAULT_CONFIG = Path.home() / "Documents/xwechat_files/all_users/config/global_config"
 
 
@@ -195,7 +200,7 @@ def atomic_write(path: Path, data: bytes) -> None:
             temp_path.unlink()
 
 
-def make_backups(mmkv: MMKVFile) -> tuple[Path, Path]:
+def make_backups(mmkv: MMKVFile) -> BackupPaths:
     config_backup = mmkv.path.with_name(f"{mmkv.path.name}.bak")
     crc_backup = mmkv.crc_path.with_name(f"{mmkv.crc_path.name}.bak")
     shutil.copy2(mmkv.path, config_backup)
@@ -203,9 +208,9 @@ def make_backups(mmkv: MMKVFile) -> tuple[Path, Path]:
     return config_backup, crc_backup
 
 
-def find_wechat_processes() -> list[tuple[int, str]]:
+def find_wechat_processes() -> list[ProcessInfo]:
     proc = Path("/proc")
-    matches: list[tuple[int, str]] = []
+    matches: list[ProcessInfo] = []
     if not proc.exists():
         return matches
 
@@ -228,7 +233,7 @@ def find_wechat_processes() -> list[tuple[int, str]]:
 def switch_theme(args: argparse.Namespace) -> int:
     config_path = args.config.expanduser().resolve()
     target_value = THEME_VALUES[args.theme]
-    target_name = args.theme
+    target_name: str = args.theme
 
     mmkv = load_mmkv(config_path)
     records = parse_records(mmkv.plain)
@@ -261,7 +266,7 @@ def switch_theme(args: argparse.Namespace) -> int:
         print("Dry run: no files written.")
         return 0
 
-    backups: tuple[Path, Path] | None = None
+    backups: BackupPaths | None = None
     if not args.no_backup:
         backups = make_backups(mmkv)
 
