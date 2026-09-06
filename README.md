@@ -1,5 +1,8 @@
 # wechat-linux-theme-switcher
 
+> [!IMPORTANT]
+> This repository is now archived because wechat now supports automatically switching the theme following the system since 4.1.13.
+
 Switch WeChat Linux 4.x appearance by appending `gAppearanceKey` to WeChat's encrypted MMKV `global_config`.
 
 ## Usage
